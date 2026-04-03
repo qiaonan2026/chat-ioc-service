@@ -1,91 +1,93 @@
 # Chat IOC Service
 
-这是一个为聊天应用设计的控制反转（IoC）容器和服务管理框架。
+Chat IOC Service 是一个基于控制反转（IoC）容器的聊天应用后端服务。
 
-## 项目结构
+## 项目特性
 
-```
-chat-ioc-service/
-├── pom.xml                    # Maven 配置文件
-├── src/
-│   ├── main/java/            # 主代码源文件
-│   │   └── com/chat/ioc/     # 核心代码包
-│   │       ├── IOCContainer.java    # IOC 容器核心实现
-│   │       ├── Autowired.java       # 依赖注入注解
-│   │       └── example/             # 示例应用
-│   │           ├── ChatApplication.java
-│   │           ├── ChatService.java
-│   │           ├── MessageService.java
-│   │           ├── NotificationService.java
-│   │           ├── UserService.java
-│   │           ├── EmailMessageService.java
-│   │           ├── PushNotificationService.java
-│   │           ├── DatabaseUserService.java
-│   │           └── model/
-│   │               └── User.java
-│   └── test/java/            # 测试代码源文件
-│       └── com/chat/ioc/     # 测试代码包
-│           ├── IOCContainerTest.java
-│           ├── AdvancedIOCContainerTest.java
-│           └── SimpleIOCContainerTest.java
-└── README.md                 # 项目说明文档
-```
+- 基于自研 IoC 容器的依赖注入
+- 模块化架构设计
+- 完整的首页接口服务
+- 健康检查和心跳检测
+- 面向接口编程
 
 ## 技术栈
 
 - Java 17
-- Maven 3.9+
-- JUnit 5 (测试框架)
-- Mockito (模拟对象)
-- AssertJ (断言库)
+- Maven
+- 自研 IOC 容器
+- JUnit 5 (测试)
 
-## 开发规范
+## 项目结构
 
-本项目采用 TDD（测试驱动开发）模式：
-
-1. 首先编写测试用例，定义期望的功能
-2. 编写最少量的代码使测试通过
-3. 重构代码，保持测试通过
-4. 重复上述过程
-
-## 运行测试
-
-```bash
-# 编译项目
-mvn compile
-
-# 运行所有测试
-mvn test
-
-# 运行特定测试
-mvn test -Dtest=SimpleIOCContainerTest
-
-# 查看测试报告
-mvn surefire-report:report
+```
+src/
+├── main/
+│   └── java/
+│       └── com/chat/ioc/
+│           ├── Application.java          # 应用启动类
+│           ├── IOCContainer.java         # IoC 容器核心实现
+│           ├── Autowired.java            # 依赖注入注解
+│           ├── config/
+│           │   └── AppConfig.java        # 应用配置
+│           ├── controller/
+│           │   └── HomeController.java   # 首页控制器
+│           ├── entity/
+│           │   ├── ApiResponse.java      # API 响应封装
+│           │   └── HomePageInfo.java     # 首页信息实体
+│           └── service/
+│               ├── HomePageService.java      # 首页服务接口
+│               └── HomePageServiceImpl.java  # 首页服务实现
+└── test/
+    └── java/
+        └── com/chat/ioc/
+            └── SimpleIOCContainerTest.java   # 测试类
 ```
 
-## 当前实现
+## API 接口
 
-当前已实现的 IoC 容器功能：
+详见 [API 文档](API_DOCUMENTATION.md)
 
-- Bean 注册与获取
-- 单例与原型作用域支持
-- 依赖注入（字段注入）
-- 循环依赖检测
-- Bean 生命周期管理（初始化方法）
+## 快速开始
 
-## 已完成功能
+### 编译项目
 
-1. **基础 IOC 容器** - 实现了基本的 Bean 管理功能
-2. **作用域管理** - 支持单例和原型作用域
-3. **依赖注入** - 通过 @Autowired 注解实现字段注入
-4. **循环依赖检测** - 防止无限递归实例化
-5. **生命周期管理** - 支持初始化方法调用
+```bash
+mvn clean compile
+```
 
-## 示例应用
+### 运行项目
 
-项目包含一个聊天应用示例，演示了 IOC 容器的实际应用：
+```bash
+mvn exec:java -Dexec.mainClass="com.chat.ioc.Application"
+```
 
-- MessageService, NotificationService, UserService 接口及其实现
-- ChatService 使用依赖注入获取所需服务
-- 控制台演示程序展示容器工作原理
+### 打包项目
+
+```bash
+mvn clean package
+```
+
+### 运行打包后的应用
+
+```bash
+java -jar target/chat-ioc-service-1.0.0-SNAPSHOT-shaded.jar
+```
+
+## 核心功能
+
+1. **IoC 容器** - 实现了依赖注入和控制反转
+2. **首页服务** - 提供首页信息、健康检查、心跳检测等功能
+3. **API 响应** - 统一的 API 响应格式
+4. **配置管理** - 基于 IoC 容器的应用配置
+
+## 测试
+
+运行所有测试：
+
+```bash
+mvn test
+```
+
+## 许可证
+
+MIT License
