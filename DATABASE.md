@@ -149,3 +149,78 @@ ORDER BY id DESC;
 - 推荐：
   - 导出/维护 SQL 脚本（建表、初始化数据）
   - 在 DBeaver 中通过 `Export Data` / `Import Data` 或执行 SQL 脚本完成数据迁移
+
+---
+
+## 9. 为什么会“突然新增很多文件”？（构建产物 vs 运行数据）
+
+### 9.1 `target/` 目录（Maven 构建产物，**不应提交**）
+
+当你执行以下命令之一时：
+
+- `mvn clean compile`
+- `mvn test`
+- `mvn package -DskipTests`
+- `mvn exec:java ...`
+
+Maven 会在项目根目录自动生成/更新 `target/`，其中常见内容包括：
+
+- `target/classes/**`：编译后的 `.class`
+- `target/test-classes/**`：测试编译产物
+- `target/surefire-reports/**`：单元测试报告（本次你看到的新增 XML/TXT 就在这里）
+- `target/chat-ioc-service-*.jar` / `target/original-*.jar`：打包生成的 jar
+- `target/maven-status/**`、`target/maven-archiver/**`：Maven 元数据
+
+这些文件数量多、每次构建都会变动，属于**可再生文件**，因此应当通过 `.gitignore` 忽略（本仓库已加入 `target/` 忽略规则）。
+
+### 9.2 `chat_ioc_db*.mv.db`（H2 本地运行数据，**不建议提交**）
+
+这是 H2 嵌入式文件数据库在本地运行时生成/更新的二进制文件，内容依赖你的本地运行与测试数据。
+
+本仓库已在 `.gitignore` 中忽略：
+
+- `chat_ioc_db*.mv.db`
+- `chat_ioc_db*.trace.db`
+
+### 9.3 如何快速清理这些新增文件
+
+- 仅清理构建产物：
+
+```bash
+mvn clean
+```
+
+- 彻底清理（包括测试报告等）：
+
+```bash
+rm -rf target/
+```
+
+---
+
+## 10. 常见坑：DBeaver 占用导致服务登录 500
+
+### 现象
+
+登录接口返回：
+
+```json
+{"code":500,"message":"Internal server error during login: Failed to find user by username","data":null}
+```
+
+同时服务端日志可能出现类似：
+
+```text
+Database may be already in use ... The file is locked: .../chat_ioc_db.mv.db
+```
+
+### 根因
+
+H2 以“嵌入式文件模式”打开数据库时，会对 `chat_ioc_db.mv.db` 加文件锁；如果 DBeaver 正在打开该文件（或以嵌入式方式连接），服务进程将无法获得锁，初始化数据库/查询时就会失败，表现为登录 500。
+
+### 解决
+
+- 关闭 DBeaver 里对应连接（或退出 DBeaver），释放文件锁
+- 再重启服务
+
+> 建议：不要让 DBeaver 与服务同时以“嵌入式文件模式”打开同一个 db 文件；如需并发访问，应改为 H2 server mode（本项目当前默认是嵌入式模式）。

@@ -2,3 +2,6 @@
 chat_ioc_db*.mv.db
 chat_ioc_db*.trace.db
 
+# Maven build outputs
+target/
+

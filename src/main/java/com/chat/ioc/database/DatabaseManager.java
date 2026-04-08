@@ -47,6 +47,9 @@ public class DatabaseManager {
                 stmt.execute(createUserTableSQL);
                 System.out.println("Database tables initialized successfully.");
             }
+
+            // 兼容旧库：如果 users 表已存在但缺列，做最小迁移
+            ensureUsersTableSchema(conn);
             
             // 检查是否已有管理员用户
             if (!hasAdminUser(conn)) {
@@ -55,6 +58,37 @@ public class DatabaseManager {
             
         } catch (SQLException e) {
             throw new RuntimeException("Failed to initialize database", e);
+        }
+    }
+
+    private static void ensureUsersTableSchema(Connection conn) throws SQLException {
+        // H2 对 "ALTER TABLE ... ADD COLUMN IF NOT EXISTS" 的支持在不同版本/模式下可能不一致，
+        // 这里用 metadata 检测后再执行 ALTER，保证兼容性。
+        if (!columnExists(conn, "USERS", "IS_ACTIVE")) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT TRUE");
+            }
+        }
+        if (!columnExists(conn, "USERS", "CREATED_AT")) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("ALTER TABLE users ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+            }
+        }
+        if (!columnExists(conn, "USERS", "UPDATED_AT")) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("ALTER TABLE users ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+            }
+        }
+    }
+
+    private static boolean columnExists(Connection conn, String tableName, String columnName) throws SQLException {
+        DatabaseMetaData meta = conn.getMetaData();
+        try (ResultSet rs = meta.getColumns(null, null, tableName, columnName)) {
+            if (rs.next()) return true;
+        }
+        // 部分数据库/配置下会把名称按原样存储，兜底再查一遍小写
+        try (ResultSet rs = meta.getColumns(null, null, tableName.toLowerCase(), columnName.toLowerCase())) {
+            return rs.next();
         }
     }
     
