@@ -1,6 +1,5 @@
 package com.chat.ioc.server;
 
-import com.chat.ioc.Application;
 import com.chat.ioc.config.AppConfig;
 import com.chat.ioc.controller.AuthController;
 import com.chat.ioc.controller.HomeController;
@@ -8,7 +7,7 @@ import com.chat.ioc.entity.ApiResponse;
 import com.chat.ioc.entity.LoginRequest;
 import com.chat.ioc.entity.LoginResponse;
 import com.chat.ioc.entity.RegisterRequest;
-import com.chat.ioc.entity.User;
+import com.chat.ioc.entity.UpdateUserRequest;
 import com.chat.ioc.service.AuthService;
 import com.chat.ioc.service.HomePageService;
 
@@ -99,15 +98,6 @@ public class SimpleHttpServer {
                 extractedToken = authorizationHeader.substring(7).trim();
             }
             
-            // 如果是GET请求，仍然需要处理Authorization头来获取token
-            String authToken = null;
-            if ("GET".equalsIgnoreCase(method) && (path.equals("/api/me") || path.equals("/api/auth/me"))) {
-                // 重新读取请求头来获取Authorization
-                // 由于流已部分读取，这里简化处理，实际应用中应该有更好的设计
-                // 在此场景下，我们将token放在查询参数中作为一个临时解决方案
-                // 或者使用特定的header
-            }
-            
             // 路由处理
             String response = routeRequest(method, path, requestBody, extractedToken);
             
@@ -123,16 +113,6 @@ public class SimpleHttpServer {
                 e.printStackTrace();
             }
         }
-    }
-    
-    private String getHeader(BufferedReader in, String headerName) throws IOException {
-        String line;
-        while ((line = in.readLine()) != null && !line.isEmpty()) {
-            if (line.toLowerCase().startsWith(headerName.toLowerCase() + ":")) {
-                return line.substring(headerName.length() + 2).trim();
-            }
-        }
-        return null;
     }
     
     private String routeRequest(String method, String path, String requestBody, String token) {
@@ -180,6 +160,14 @@ public class SimpleHttpServer {
                         return toJson(response);
                     } else {
                         // 返回错误响应
+                        return createErrorResponse(400, "Bad Request: Invalid JSON");
+                    }
+                } else if ("/api/me/sync".equals(path) || "/api/user/sync".equals(path)) {
+                    UpdateUserRequest updateRequest = parseUpdateUserRequest(requestBody);
+                    if (updateRequest != null) {
+                        var response = authController.syncCurrentUser(token, updateRequest);
+                        return toJson(response);
+                    } else {
                         return createErrorResponse(400, "Bad Request: Invalid JSON");
                     }
                 }
@@ -315,6 +303,45 @@ public class SimpleHttpServer {
             e.printStackTrace();
         }
         return null;
+    }
+
+    private UpdateUserRequest parseUpdateUserRequest(String json) {
+        try {
+            if (json == null || json.trim().isEmpty()) {
+                System.err.println("Empty or null JSON request body for user update");
+                return null;
+            }
+
+            Pattern emailPattern = Pattern.compile("\"email\"\\s*:\\s*\"([^\"]*)\"");
+            Pattern nicknamePattern = Pattern.compile("\"nickname\"\\s*:\\s*\"([^\"]*)\"");
+
+            Matcher emailMatcher = emailPattern.matcher(json);
+            Matcher nicknameMatcher = nicknamePattern.matcher(json);
+
+            String email = null;
+            String nickname = null;
+
+            if (emailMatcher.find()) {
+                email = emailMatcher.group(1);
+            }
+            if (nicknameMatcher.find()) {
+                nickname = nicknameMatcher.group(1);
+            }
+
+            // allow partial update, but require at least one field
+            if (email == null && nickname == null) {
+                return null;
+            }
+
+            UpdateUserRequest req = new UpdateUserRequest();
+            req.setEmail(email);
+            req.setNickname(nickname);
+            return req;
+        } catch (Exception e) {
+            System.err.println("Exception occurred while parsing update user request: " + e.getMessage());
+            e.printStackTrace();
+            return null;
+        }
     }
     
     private String toJson(Object obj) {

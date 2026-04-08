@@ -5,6 +5,7 @@ import com.chat.ioc.entity.LoginRequest;
 import com.chat.ioc.entity.LoginResponse;
 import com.chat.ioc.entity.RegisterRequest;
 import com.chat.ioc.entity.User;
+import com.chat.ioc.entity.UpdateUserRequest;
 import com.chat.ioc.service.AuthService;
 
 public class AuthController {
@@ -96,6 +97,29 @@ public class AuthController {
         } catch (Exception e) {
             e.printStackTrace();
             return ApiResponse.error("Failed to retrieve user info: " + e.getMessage());
+        }
+    }
+
+    public ApiResponse<User> syncCurrentUser(String token, UpdateUserRequest updateRequest) {
+        try {
+            if (token == null || token.trim().isEmpty()) {
+                return ApiResponse.error(401, "Unauthorized: Token required");
+            }
+            if (updateRequest == null) {
+                return ApiResponse.error(400, "Bad Request: Invalid JSON");
+            }
+
+            User updated = authService.updateCurrentUser(token, updateRequest);
+            if (updated == null) {
+                return ApiResponse.error(401, "Unauthorized: Invalid token");
+            }
+            updated.setPassword(null); // never return password
+            return ApiResponse.success("User info updated successfully", updated);
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.error(400, "Bad Request: " + e.getMessage());
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ApiResponse.error("Failed to update user info: " + e.getMessage());
         }
     }
 }

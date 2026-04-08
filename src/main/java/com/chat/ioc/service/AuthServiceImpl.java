@@ -4,6 +4,7 @@ import com.chat.ioc.database.DatabaseManager;
 import com.chat.ioc.entity.LoginRequest;
 import com.chat.ioc.entity.LoginResponse;
 import com.chat.ioc.entity.User;
+import com.chat.ioc.entity.UpdateUserRequest;
 
 import java.util.Map;
 import java.util.UUID;
@@ -83,6 +84,29 @@ public class AuthServiceImpl implements AuthService {
             }
         }
         return null;
+    }
+
+    @Override
+    public User updateCurrentUser(String token, UpdateUserRequest updateRequest) {
+        if (updateRequest == null) {
+            throw new IllegalArgumentException("updateRequest is required");
+        }
+
+        User user = findByToken(token);
+        if (user == null) {
+            return null;
+        }
+
+        // Only allow updating profile fields here
+        if (updateRequest.getEmail() != null) {
+            user.setEmail(updateRequest.getEmail());
+        }
+        if (updateRequest.getNickname() != null) {
+            user.setNickname(updateRequest.getNickname());
+        }
+
+        // Keep existing password/isActive as-is
+        return databaseManager.updateUser(user);
     }
 
     private String generateToken(User user) {
