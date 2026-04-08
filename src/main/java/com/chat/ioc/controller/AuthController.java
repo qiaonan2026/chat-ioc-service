@@ -43,9 +43,21 @@ public class AuthController {
 
     public ApiResponse<User> register(RegisterRequest registerRequest) {
         try {
+            if (registerRequest == null
+                    || registerRequest.getUsername() == null || registerRequest.getUsername().trim().isEmpty()
+                    || registerRequest.getPassword() == null || registerRequest.getPassword().trim().isEmpty()) {
+                return ApiResponse.error(400, "Bad Request: username/password required");
+            }
+
+            String username = registerRequest.getUsername().trim();
+            User existing = authService.findByUsername(username);
+            if (existing != null) {
+                return ApiResponse.error(409, "User already exists");
+            }
+
             // Create a new user from the registration request
             User newUser = new User();
-            newUser.setUsername(registerRequest.getUsername());
+            newUser.setUsername(username);
             newUser.setPassword(registerRequest.getPassword()); // In a real app, this should be hashed
             newUser.setEmail(registerRequest.getEmail());
             newUser.setNickname(registerRequest.getNickname());
@@ -55,13 +67,16 @@ public class AuthController {
             User registeredUser = authService.registerUser(newUser);
 
             if (registeredUser != null) {
-                return ApiResponse.success("User registered successfully", registeredUser);
+                registeredUser.setPassword(null); // never return password
+                return ApiResponse.success("Register successful", registeredUser);
             } else {
-                return ApiResponse.error("Registration failed: username may already exist");
+                return ApiResponse.error(409, "Registration failed: username may already exist");
             }
+        } catch (RuntimeException e) {
+            return ApiResponse.error(409, "Register failed: " + e.getMessage());
         } catch (Exception e) {
             e.printStackTrace();
-            return ApiResponse.error("Registration failed due to server error: " + e.getMessage());
+            return ApiResponse.error("Register failed due to server error: " + e.getMessage());
         }
     }
 }
