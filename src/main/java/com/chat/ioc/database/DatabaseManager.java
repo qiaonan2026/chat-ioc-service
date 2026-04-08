@@ -1,8 +1,11 @@
 package com.chat.ioc.database;
 
+import com.chat.ioc.entity.ChatMessage;
+import com.chat.ioc.entity.ChatSession;
 import com.chat.ioc.entity.User;
 
 import java.sql.*;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -50,6 +53,9 @@ public class DatabaseManager {
 
             // 兼容旧库：如果 users 表已存在但缺列，做最小迁移
             ensureUsersTableSchema(conn);
+
+            // 创建聊天会话与消息表
+            ensureChatTables(conn);
             
             // 检查是否已有管理员用户
             if (!hasAdminUser(conn)) {
@@ -58,6 +64,30 @@ public class DatabaseManager {
             
         } catch (SQLException e) {
             throw new RuntimeException("Failed to initialize database", e);
+        }
+    }
+
+    private static void ensureChatTables(Connection conn) throws SQLException {
+        String createSessions = """
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                session_id VARCHAR(64) PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """;
+        String createMessages = """
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                session_id VARCHAR(64) NOT NULL,
+                role VARCHAR(32) NOT NULL,
+                content CLOB NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT fk_chat_messages_session FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id)
+            )
+            """;
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute(createSessions);
+            stmt.execute(createMessages);
         }
     }
 
@@ -257,6 +287,164 @@ public class DatabaseManager {
             return null;
         } catch (SQLException e) {
             throw new RuntimeException("Failed to find user by id", e);
+        }
+    }
+
+    public boolean chatSessionExists(String sessionId) {
+        if (sessionId == null || sessionId.trim().isEmpty()) return false;
+        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD)) {
+            String sql = "SELECT COUNT(*) FROM chat_sessions WHERE session_id = ?";
+            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                stmt.setString(1, sessionId);
+                ResultSet rs = stmt.executeQuery();
+                if (rs.next()) return rs.getInt(1) > 0;
+            }
+            return false;
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to check chat session", e);
+        }
+    }
+
+    public void createChatSession(String sessionId) {
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            throw new IllegalArgumentException("sessionId is required");
+        }
+        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD)) {
+            String sql = "INSERT INTO chat_sessions (session_id) VALUES (?)";
+            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                stmt.setString(1, sessionId);
+                stmt.executeUpdate();
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to create chat session", e);
+        }
+    }
+
+    public void touchChatSession(String sessionId) {
+        if (sessionId == null || sessionId.trim().isEmpty()) return;
+        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD)) {
+            String sql = "UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE session_id = ?";
+            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                stmt.setString(1, sessionId);
+                stmt.executeUpdate();
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to update chat session timestamp", e);
+        }
+    }
+
+    public ChatMessage insertChatMessage(String sessionId, String role, String content) {
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            throw new IllegalArgumentException("sessionId is required");
+        }
+        if (role == null || role.trim().isEmpty()) {
+            throw new IllegalArgumentException("role is required");
+        }
+        if (content == null) content = "";
+
+        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD)) {
+            String sql = "INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)";
+            try (PreparedStatement stmt = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+                stmt.setString(1, sessionId);
+                stmt.setString(2, role);
+                stmt.setString(3, content);
+                stmt.executeUpdate();
+                long id = 0;
+                try (ResultSet keys = stmt.getGeneratedKeys()) {
+                    if (keys.next()) id = keys.getLong(1);
+                }
+                touchChatSession(sessionId);
+                return new ChatMessage(id, sessionId, role, content, Instant.now());
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to insert chat message", e);
+        }
+    }
+
+    public List<ChatMessage> findChatMessages(String sessionId) {
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            throw new IllegalArgumentException("sessionId is required");
+        }
+        List<ChatMessage> messages = new ArrayList<>();
+        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD)) {
+            String sql = "SELECT id, session_id, role, content, created_at FROM chat_messages WHERE session_id = ? ORDER BY id ASC";
+            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                stmt.setString(1, sessionId);
+                ResultSet rs = stmt.executeQuery();
+                while (rs.next()) {
+                    ChatMessage m = new ChatMessage();
+                    m.setId(rs.getLong("id"));
+                    m.setSessionId(rs.getString("session_id"));
+                    m.setRole(rs.getString("role"));
+                    m.setContent(rs.getString("content"));
+                    Timestamp ts = rs.getTimestamp("created_at");
+                    if (ts != null) m.setCreatedAt(ts.toInstant());
+                    messages.add(m);
+                }
+            }
+            return messages;
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to query chat messages", e);
+        }
+    }
+
+    public List<ChatSession> findChatSessions(int limit, int offset) {
+        int safeLimit = limit <= 0 ? 20 : Math.min(limit, 200);
+        int safeOffset = Math.max(offset, 0);
+        List<ChatSession> sessions = new ArrayList<>();
+        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD)) {
+            String sql = "SELECT session_id, created_at, updated_at FROM chat_sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?";
+            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                stmt.setInt(1, safeLimit);
+                stmt.setInt(2, safeOffset);
+                ResultSet rs = stmt.executeQuery();
+                while (rs.next()) {
+                    String sessionId = rs.getString("session_id");
+                    Timestamp createdTs = rs.getTimestamp("created_at");
+                    Timestamp updatedTs = rs.getTimestamp("updated_at");
+                    ChatSession s = new ChatSession();
+                    s.setSessionId(sessionId);
+                    if (createdTs != null) s.setCreatedAt(createdTs.toInstant());
+                    if (updatedTs != null) s.setUpdatedAt(updatedTs.toInstant());
+                    sessions.add(s);
+                }
+            }
+            return sessions;
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to query chat sessions", e);
+        }
+    }
+
+    public List<ChatSession> findChatSessions(int limit) {
+        return findChatSessions(limit, 0);
+    }
+
+    public boolean deleteChatSession(String sessionId) {
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            throw new IllegalArgumentException("sessionId is required");
+        }
+        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD)) {
+            conn.setAutoCommit(false);
+            try {
+                try (PreparedStatement delMsgs = conn.prepareStatement("DELETE FROM chat_messages WHERE session_id = ?")) {
+                    delMsgs.setString(1, sessionId);
+                    delMsgs.executeUpdate();
+                }
+                int affected;
+                try (PreparedStatement delSession = conn.prepareStatement("DELETE FROM chat_sessions WHERE session_id = ?")) {
+                    delSession.setString(1, sessionId);
+                    affected = delSession.executeUpdate();
+                }
+                conn.commit();
+                return affected > 0;
+            } catch (SQLException e) {
+                try { conn.rollback(); } catch (SQLException ignored) {}
+                throw e;
+            } finally {
+                try { conn.setAutoCommit(true); } catch (SQLException ignored) {}
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to delete chat session", e);
         }
     }
 }

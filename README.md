@@ -38,6 +38,8 @@ src/
 │           │   └── HomeController.java       # 首页控制器
 │           ├── entity/
 │           │   ├── ApiResponse.java          # API 响应封装
+│           │   ├── ChatMessage.java          # 聊天消息实体
+│           │   ├── ChatSession.java          # 聊天会话实体
 │           │   ├── HomePageInfo.java         # 首页信息实体
 │           │   ├── LoginRequest.java         # 登录请求实体
 │           │   ├── LoginResponse.java        # 登录响应实体

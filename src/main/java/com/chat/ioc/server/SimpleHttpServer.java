@@ -3,7 +3,10 @@ package com.chat.ioc.server;
 import com.chat.ioc.config.AppConfig;
 import com.chat.ioc.controller.AuthController;
 import com.chat.ioc.controller.HomeController;
+import com.chat.ioc.database.DatabaseManager;
 import com.chat.ioc.entity.ApiResponse;
+import com.chat.ioc.entity.ChatMessage;
+import com.chat.ioc.entity.ChatSession;
 import com.chat.ioc.entity.LoginRequest;
 import com.chat.ioc.entity.LoginResponse;
 import com.chat.ioc.entity.RegisterRequest;
@@ -15,6 +18,11 @@ import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -28,6 +36,7 @@ public class SimpleHttpServer {
     
     private final HomeController homeController;
     private final AuthController authController;
+    private final DatabaseManager databaseManager;
     
     public SimpleHttpServer() {
         // 初始化IoC容器和控制器
@@ -37,6 +46,10 @@ public class SimpleHttpServer {
         
         AuthService authService = (AuthService) container.getBean("authService");
         this.authController = new AuthController(authService);
+
+        this.databaseManager = new DatabaseManager();
+        // Ensure DB is ready (AuthServiceImpl also initializes, but keep server usable even if auth isn't hit)
+        DatabaseManager.initializeDatabase();
     }
     
     public void start(int port) throws IOException {
@@ -52,58 +65,59 @@ public class SimpleHttpServer {
     }
     
     private void handleRequest(Socket clientSocket) {
-        try (BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-             PrintWriter out = new PrintWriter(clientSocket.getOutputStream(), true);
-             BufferedWriter dataOut = new BufferedWriter(new OutputStreamWriter(clientSocket.getOutputStream(), StandardCharsets.UTF_8))) {
-            
-            // 读取请求行
-            String requestLine = in.readLine();
-            if (requestLine == null) return;
-            
-            String[] parts = requestLine.split(" ");
-            if (parts.length != 3) return;
-            
-            String method = parts[0];
-            String path = parts[1];
-            
-            // 读取请求头并存储Content-Length和Authorization
-            String line;
-            String contentLengthHeader = null;
-            String authorizationHeader = null;
-            while ((line = in.readLine()) != null && !line.isEmpty()) {
-                if (line.toLowerCase().startsWith("content-length:")) {
-                    contentLengthHeader = line.substring("content-length:".length()).trim();
-                } else if (line.toLowerCase().startsWith("authorization:")) {
-                    authorizationHeader = line.substring("authorization:".length()).trim();
-                }
+        try (InputStream rawIn = clientSocket.getInputStream();
+             OutputStream rawOut = clientSocket.getOutputStream();
+             PrintWriter out = new PrintWriter(new OutputStreamWriter(rawOut, StandardCharsets.UTF_8), true);
+             BufferedWriter dataOut = new BufferedWriter(new OutputStreamWriter(rawOut, StandardCharsets.UTF_8))) {
+
+            HttpRequest req = readHttpRequest(rawIn);
+            if (req == null) return;
+
+            String method = req.method;
+            String rawPath = req.rawPath;
+            String path = rawPath;
+            String rawQuery = null;
+            int qIdx = rawPath.indexOf('?');
+            if (qIdx >= 0) {
+                path = rawPath.substring(0, qIdx);
+                rawQuery = rawPath.substring(qIdx + 1);
             }
-            
-            // 处理POST请求体
-            String requestBody = "";
-            if ("POST".equalsIgnoreCase(method) && contentLengthHeader != null) {
-                int contentLength = Integer.parseInt(contentLengthHeader);
-                char[] bodyChars = new char[contentLength];
-                int totalRead = 0;
-                while (totalRead < contentLength) {
-                    int read = in.read(bodyChars, totalRead, contentLength - totalRead);
-                    if (read == -1) break;
-                    totalRead += read;
-                }
-                requestBody = new String(bodyChars);
-            }
-            
+            Map<String, String> queryParams = parseQueryParams(rawQuery);
+
+            String authorizationHeader = req.headers.get("authorization");
+            String requestBody = req.body == null ? "" : new String(req.body, StandardCharsets.UTF_8);
+
             // 提取Bearer token
             String extractedToken = null;
             if (authorizationHeader != null && authorizationHeader.toLowerCase().startsWith("bearer ")) {
                 extractedToken = authorizationHeader.substring(7).trim();
             }
-            
-            // 路由处理
-            String response = routeRequest(method, path, requestBody, extractedToken);
-            
-            // 发送响应
+
+            // 预检请求
+            if ("OPTIONS".equalsIgnoreCase(method)) {
+                sendResponse(out, dataOut, "{\"code\":200,\"message\":\"OK\",\"data\":null}");
+                return;
+            }
+
+            // /api/chat：支持 SSE（流式）和普通 JSON（兼容 xhr/axios）
+            if ("POST".equalsIgnoreCase(method) && "/api/chat".equals(path)) {
+                boolean wantsSse = clientWantsSse(req.headers, queryParams);
+                boolean wantsStream = clientWantsStream(req.headers, queryParams, requestBody);
+                if (wantsSse) {
+                    handleChatStream(rawOut, requestBody);
+                } else if (wantsStream) {
+                    handleChatNdjsonStream(rawOut, requestBody);
+                } else {
+                    String response = handleChatJson(requestBody);
+                    sendResponse(out, dataOut, response);
+                }
+                return;
+            }
+
+            // 其他路由：普通 JSON
+            String response = routeRequest(method, path, queryParams, requestBody, extractedToken);
             sendResponse(out, dataOut, response);
-            
+
         } catch (Exception e) {
             e.printStackTrace();
         } finally {
@@ -115,7 +129,7 @@ public class SimpleHttpServer {
         }
     }
     
-    private String routeRequest(String method, String path, String requestBody, String token) {
+    private String routeRequest(String method, String path, Map<String, String> queryParams, String requestBody, String token) {
         try {
             // 定义路由模式
             if ("GET".equalsIgnoreCase(method)) {
@@ -135,6 +149,36 @@ public class SimpleHttpServer {
                     // 获取当前用户信息
                     var response = authController.getCurrentUser(token);
                     return toJson(response);
+                } else if ("/api/chat/session".equals(path)) {
+                    String sessionId = queryParams.get("sessionId");
+                    if (sessionId == null || sessionId.trim().isEmpty()) {
+                        return createErrorResponse(400, "Bad Request: sessionId required");
+                    }
+                    if (!databaseManager.chatSessionExists(sessionId)) {
+                        return createErrorResponse(404, "Not Found");
+                    }
+                    List<ChatMessage> messages = databaseManager.findChatMessages(sessionId);
+                    return createSuccessResponse(buildChatHistoryDataJson(sessionId, messages));
+                } else if ("/api/chat/sessions".equals(path)) {
+                    int limit = parseIntOrDefault(queryParams.get("limit"), 20);
+                    int offset = parseIntOrDefault(queryParams.get("offset"), 0);
+                    List<ChatSession> sessions = databaseManager.findChatSessions(limit, offset);
+                    return createSuccessResponse(buildChatSessionsDataJson(sessions, limit, offset));
+                }
+            } else if ("DELETE".equalsIgnoreCase(method)) {
+                if ("/api/chat/session".equals(path)) {
+                    String sessionId = queryParams.get("sessionId");
+                    if (sessionId == null || sessionId.trim().isEmpty()) {
+                        return createErrorResponse(400, "Bad Request: sessionId required");
+                    }
+                    if (!databaseManager.chatSessionExists(sessionId)) {
+                        return createErrorResponse(404, "Not Found");
+                    }
+                    boolean ok = databaseManager.deleteChatSession(sessionId);
+                    if (!ok) {
+                        return createErrorResponse(500, "Internal Server Error");
+                    }
+                    return createSuccessResponse("{\"deleted\":true,\"sessionId\":\"" + escapeJson(sessionId) + "\"}");
                 }
             } else if ("POST".equalsIgnoreCase(method)) {
                 if ("/api/login".equals(path) || "/api/auth/login".equals(path)) {
@@ -170,6 +214,12 @@ public class SimpleHttpServer {
                     } else {
                         return createErrorResponse(400, "Bad Request: Invalid JSON");
                     }
+                } else if ("/api/chat/session".equals(path)) {
+                    // 创建会话
+                    String sessionId = UUID.randomUUID().toString().replace("-", "");
+                    databaseManager.createChatSession(sessionId);
+                    String dataJson = "{\"sessionId\":\"" + escapeJson(sessionId) + "\",\"createdAt\":\"" + Instant.now().toString() + "\"}";
+                    return createSuccessResponse(dataJson);
                 }
             }
         } catch (Exception e) {
@@ -178,6 +228,367 @@ public class SimpleHttpServer {
         }
         
         return createErrorResponse(404, "Not Found");
+    }
+
+    private void handleChatStream(OutputStream outputStream, String requestBody) throws IOException {
+        Map<String, String> req = parseChatRequest(requestBody);
+        if (req == null) {
+            sendSseError(outputStream, 400, "Bad Request: Invalid JSON");
+            return;
+        }
+
+        String message = req.get("message");
+        String sessionId = req.get("sessionId");
+
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            sendSseError(outputStream, 400, "Bad Request: sessionId required");
+            return;
+        }
+        if (!databaseManager.chatSessionExists(sessionId)) {
+            sendSseError(outputStream, 404, "Not Found");
+            return;
+        }
+
+        String assistant = generateAssistantReply(message);
+
+        // SSE headers
+        BufferedWriter w = new BufferedWriter(new OutputStreamWriter(outputStream, StandardCharsets.UTF_8));
+        w.write("HTTP/1.1 200 OK\r\n");
+        w.write("Content-Type: text/event-stream; charset=utf-8\r\n");
+        w.write("Cache-Control: no-cache\r\n");
+        w.write("X-Accel-Buffering: no\r\n");
+        w.write("Connection: keep-alive\r\n");
+        w.write("Access-Control-Allow-Origin: *\r\n");
+        w.write("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n");
+        w.write("Access-Control-Allow-Headers: Content-Type, Authorization\r\n");
+        w.write("\r\n");
+        w.flush();
+
+        // 先发一个 start 事件（含 sessionId）
+        String startData = "{\"code\":200,\"message\":\"OK\",\"data\":{\"event\":\"start\",\"sessionId\":\""
+            + escapeJson(sessionId)
+            + "\"}}";
+        writeSseEvent(w, "message", startData);
+
+        // 流式发送 delta
+        StringBuilder full = new StringBuilder();
+        if (assistant != null) {
+            for (int i = 0; i < assistant.length(); i++) {
+                String delta = String.valueOf(assistant.charAt(i));
+                full.append(delta);
+                String chunk = "{\"code\":200,\"message\":\"OK\",\"data\":{\"event\":\"delta\",\"delta\":\"" + escapeJson(delta) + "\"}}";
+                writeSseEvent(w, "message", chunk);
+                // 给前端留出可感知的流式节奏，避免被中间层聚合缓存
+                try { Thread.sleep(10); } catch (InterruptedException ignored) {}
+            }
+        }
+
+        // 持久化：sessionId 已校验存在
+        databaseManager.insertChatMessage(sessionId, "user", message == null ? "" : message);
+        databaseManager.insertChatMessage(sessionId, "assistant", full.toString());
+
+        // done 事件
+        String done = "{\"code\":200,\"message\":\"OK\",\"data\":{\"event\":\"done\"}}";
+        writeSseEvent(w, "message", done);
+        w.flush();
+    }
+
+    private String handleChatJson(String requestBody) {
+        Map<String, String> req = parseChatRequest(requestBody);
+        if (req == null) {
+            return createErrorResponse(400, "Bad Request: Invalid JSON");
+        }
+
+        String message = req.get("message");
+        String sessionId = req.get("sessionId");
+
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            return createErrorResponse(400, "Bad Request: sessionId required");
+        }
+        if (!databaseManager.chatSessionExists(sessionId)) {
+            return createErrorResponse(404, "Not Found");
+        }
+
+        String assistant = generateAssistantReply(message);
+        databaseManager.insertChatMessage(sessionId, "user", message == null ? "" : message);
+        databaseManager.insertChatMessage(sessionId, "assistant", assistant == null ? "" : assistant);
+
+        String dataJson =
+            "{"
+                + "\"sessionId\":\"" + escapeJson(sessionId) + "\","
+                + "\"reply\":\"" + escapeJson(assistant == null ? "" : assistant) + "\""
+            + "}";
+        return createSuccessResponse(dataJson);
+    }
+
+    private boolean clientWantsSse(Map<String, String> headers, Map<String, String> queryParams) {
+        if (queryParams != null) {
+            String sse = queryParams.get("sse");
+            if ("1".equals(sse) || "true".equalsIgnoreCase(sse)) return true;
+            String transport = queryParams.get("transport");
+            if (transport != null && transport.equalsIgnoreCase("sse")) return true;
+        }
+        if (headers == null) return false;
+        String accept = headers.get("accept");
+        if (accept == null) return false;
+        return accept.toLowerCase().contains("text/event-stream");
+    }
+
+    private boolean clientWantsStream(Map<String, String> headers, Map<String, String> queryParams, String requestBody) {
+        if (queryParams != null) {
+            String stream = queryParams.get("stream");
+            if ("1".equals(stream) || "true".equalsIgnoreCase(stream)) return true;
+        }
+        if (headers != null) {
+            String xStream = headers.get("x-stream");
+            if ("1".equals(xStream) || "true".equalsIgnoreCase(xStream)) return true;
+        }
+        if (requestBody == null || requestBody.trim().isEmpty()) return false;
+        // 轻量解析：支持 {"stream":true} / {"stream":1}
+        Pattern p = Pattern.compile("\"stream\"\\s*:\\s*(true|1)", Pattern.CASE_INSENSITIVE);
+        return p.matcher(requestBody).find();
+    }
+
+    private void handleChatNdjsonStream(OutputStream outputStream, String requestBody) throws IOException {
+        Map<String, String> req = parseChatRequest(requestBody);
+        if (req == null) {
+            sendNdjsonError(outputStream, 400, "Bad Request: Invalid JSON");
+            return;
+        }
+
+        String message = req.get("message");
+        String sessionId = req.get("sessionId");
+
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            sendNdjsonError(outputStream, 400, "Bad Request: sessionId required");
+            return;
+        }
+        if (!databaseManager.chatSessionExists(sessionId)) {
+            sendNdjsonError(outputStream, 404, "Not Found");
+            return;
+        }
+
+        String assistant = generateAssistantReply(message);
+
+        BufferedWriter w = new BufferedWriter(new OutputStreamWriter(outputStream, StandardCharsets.UTF_8));
+        w.write("HTTP/1.1 200 OK\r\n");
+        w.write("Content-Type: application/x-ndjson; charset=utf-8\r\n");
+        w.write("Cache-Control: no-cache\r\n");
+        w.write("X-Accel-Buffering: no\r\n");
+        w.write("Connection: close\r\n");
+        w.write("Access-Control-Allow-Origin: *\r\n");
+        w.write("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n");
+        w.write("Access-Control-Allow-Headers: Content-Type, Authorization\r\n");
+        w.write("\r\n");
+        w.flush();
+
+        writeNdjsonLine(w, "{\"code\":200,\"message\":\"OK\",\"data\":{\"event\":\"start\",\"sessionId\":\""
+            + escapeJson(sessionId)
+            + "\"}}");
+
+        StringBuilder full = new StringBuilder();
+        if (assistant != null) {
+            for (int i = 0; i < assistant.length(); i++) {
+                String delta = String.valueOf(assistant.charAt(i));
+                full.append(delta);
+                writeNdjsonLine(w, "{\"code\":200,\"message\":\"OK\",\"data\":{\"event\":\"delta\",\"delta\":\"" + escapeJson(delta) + "\"}}");
+                try { Thread.sleep(10); } catch (InterruptedException ignored) {}
+            }
+        }
+
+        databaseManager.insertChatMessage(sessionId, "user", message == null ? "" : message);
+        databaseManager.insertChatMessage(sessionId, "assistant", full.toString());
+
+        writeNdjsonLine(w, "{\"code\":200,\"message\":\"OK\",\"data\":{\"event\":\"done\"}}");
+        w.flush();
+    }
+
+    private void sendNdjsonError(OutputStream outputStream, int code, String message) throws IOException {
+        BufferedWriter w = new BufferedWriter(new OutputStreamWriter(outputStream, StandardCharsets.UTF_8));
+        w.write("HTTP/1.1 200 OK\r\n");
+        w.write("Content-Type: application/x-ndjson; charset=utf-8\r\n");
+        w.write("Cache-Control: no-cache\r\n");
+        w.write("X-Accel-Buffering: no\r\n");
+        w.write("Connection: close\r\n");
+        w.write("Access-Control-Allow-Origin: *\r\n");
+        w.write("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n");
+        w.write("Access-Control-Allow-Headers: Content-Type, Authorization\r\n");
+        w.write("\r\n");
+        writeNdjsonLine(w, "{\"code\":" + code + ",\"message\":\"" + escapeJson(message) + "\",\"data\":null}");
+        w.flush();
+    }
+
+    private void writeNdjsonLine(BufferedWriter w, String jsonLine) throws IOException {
+        w.write(jsonLine);
+        w.write("\n");
+        w.flush();
+    }
+
+    private void sendSseError(OutputStream outputStream, int code, String message) throws IOException {
+        BufferedWriter w = new BufferedWriter(new OutputStreamWriter(outputStream, StandardCharsets.UTF_8));
+        w.write("HTTP/1.1 200 OK\r\n");
+        w.write("Content-Type: text/event-stream; charset=utf-8\r\n");
+        w.write("Cache-Control: no-cache\r\n");
+        w.write("X-Accel-Buffering: no\r\n");
+        w.write("Connection: keep-alive\r\n");
+        w.write("Access-Control-Allow-Origin: *\r\n");
+        w.write("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n");
+        w.write("Access-Control-Allow-Headers: Content-Type, Authorization\r\n");
+        w.write("\r\n");
+        String data = "{\"code\":" + code + ",\"message\":\"" + escapeJson(message) + "\",\"data\":null}";
+        writeSseEvent(w, "error", data);
+        w.flush();
+    }
+
+    private void writeSseEvent(BufferedWriter w, String event, String dataJson) throws IOException {
+        w.write("event: " + event + "\n");
+        // SSE 的 data 不能有裸换行，简单起见把 JSON 压成单行
+        w.write("data: " + dataJson + "\n\n");
+        w.flush();
+    }
+
+    private Map<String, String> parseChatRequest(String json) {
+        try {
+            if (json == null || json.trim().isEmpty()) return null;
+            Pattern msgPattern = Pattern.compile("\"message\"\\s*:\\s*\"([^\"]*)\"");
+            Pattern contentPattern = Pattern.compile("\"content\"\\s*:\\s*\"([^\"]*)\"");
+            Pattern sessionPattern = Pattern.compile("\"sessionId\"\\s*:\\s*\"([^\"]*)\"");
+            Matcher mm = msgPattern.matcher(json);
+            Matcher cm = contentPattern.matcher(json);
+            Matcher sm = sessionPattern.matcher(json);
+            String message = null;
+            String sessionId = null;
+            if (mm.find()) {
+                message = mm.group(1);
+            } else if (cm.find()) {
+                message = cm.group(1);
+            }
+            if (sm.find()) sessionId = sm.group(1);
+            if (message == null) return null;
+            Map<String, String> m = new HashMap<>();
+            m.put("message", message);
+            m.put("sessionId", sessionId);
+            return m;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static class HttpRequest {
+        final String method;
+        final String rawPath;
+        final Map<String, String> headers;
+        final byte[] body;
+
+        private HttpRequest(String method, String rawPath, Map<String, String> headers, byte[] body) {
+            this.method = method;
+            this.rawPath = rawPath;
+            this.headers = headers;
+            this.body = body;
+        }
+    }
+
+    private HttpRequest readHttpRequest(InputStream in) throws IOException {
+        byte[] headerBytes = readUntilDoubleCrlf(in, 64 * 1024);
+        if (headerBytes == null) return null;
+
+        String headerText = new String(headerBytes, StandardCharsets.ISO_8859_1);
+        String[] lines = headerText.split("\r\n");
+        if (lines.length == 0) return null;
+
+        String[] requestLineParts = lines[0].split(" ");
+        if (requestLineParts.length < 2) return null;
+        String method = requestLineParts[0];
+        String rawPath = requestLineParts[1];
+
+        Map<String, String> headers = new HashMap<>();
+        for (int i = 1; i < lines.length; i++) {
+            String line = lines[i];
+            if (line == null || line.isEmpty()) continue;
+            int idx = line.indexOf(':');
+            if (idx <= 0) continue;
+            String name = line.substring(0, idx).trim().toLowerCase();
+            String value = line.substring(idx + 1).trim();
+            headers.put(name, value);
+        }
+
+        int contentLength = 0;
+        String cl = headers.get("content-length");
+        if (cl != null && !cl.isEmpty()) {
+            try {
+                contentLength = Integer.parseInt(cl);
+            } catch (NumberFormatException ignored) {
+                contentLength = 0;
+            }
+        }
+
+        byte[] body = null;
+        if (contentLength > 0) {
+            body = readFixedBytes(in, contentLength);
+        }
+
+        return new HttpRequest(method, rawPath, headers, body);
+    }
+
+    private byte[] readUntilDoubleCrlf(InputStream in, int maxBytes) throws IOException {
+        ByteArrayOutputStream buf = new ByteArrayOutputStream();
+        int state = 0; // tracks \r\n\r\n
+        while (buf.size() < maxBytes) {
+            int b = in.read();
+            if (b == -1) return null;
+            buf.write(b);
+            if (state == 0 && b == '\r') state = 1;
+            else if (state == 1 && b == '\n') state = 2;
+            else if (state == 2 && b == '\r') state = 3;
+            else if (state == 3 && b == '\n') return buf.toByteArray();
+            else state = (b == '\r') ? 1 : 0;
+        }
+        throw new IOException("Request header too large");
+    }
+
+    private byte[] readFixedBytes(InputStream in, int len) throws IOException {
+        byte[] data = new byte[len];
+        int off = 0;
+        while (off < len) {
+            int r = in.read(data, off, len - off);
+            if (r == -1) throw new EOFException("Unexpected EOF while reading request body");
+            off += r;
+        }
+        return data;
+    }
+
+    private String generateAssistantReply(String message) {
+        if (message == null) return "我没有收到消息内容。";
+        String trimmed = message.trim();
+        if (trimmed.isEmpty()) return "消息为空。";
+        return "你说： " + trimmed;
+    }
+
+    private Map<String, String> parseQueryParams(String rawQuery) {
+        Map<String, String> map = new HashMap<>();
+        if (rawQuery == null || rawQuery.trim().isEmpty()) return map;
+        String[] pairs = rawQuery.split("&");
+        for (String p : pairs) {
+            if (p.isEmpty()) continue;
+            int idx = p.indexOf('=');
+            if (idx < 0) {
+                map.put(urlDecode(p), "");
+            } else {
+                String k = urlDecode(p.substring(0, idx));
+                String v = urlDecode(p.substring(idx + 1));
+                map.put(k, v);
+            }
+        }
+        return map;
+    }
+
+    private String urlDecode(String s) {
+        if (s == null) return null;
+        try {
+            return java.net.URLDecoder.decode(s, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return s;
+        }
     }
     
     private LoginRequest parseLoginRequest(String json) {
@@ -420,6 +831,63 @@ public class SimpleHttpServer {
                  .replace("\n", "\\n")
                  .replace("\r", "\\r")
                  .replace("\t", "\\t");
+    }
+
+    private String createSuccessResponse(String dataJson) {
+        return "{\"code\":200,\"message\":\"OK\",\"data\":" + (dataJson == null ? "null" : dataJson) + "}";
+    }
+
+    private String buildChatHistoryDataJson(String sessionId, List<ChatMessage> messages) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{");
+        sb.append("\"sessionId\":\"").append(escapeJson(sessionId)).append("\",");
+        sb.append("\"messages\":[");
+        for (int i = 0; i < messages.size(); i++) {
+            ChatMessage m = messages.get(i);
+            if (i > 0) sb.append(",");
+            sb.append("{");
+            sb.append("\"id\":").append(m.getId()).append(",");
+            sb.append("\"role\":\"").append(escapeJson(m.getRole())).append("\",");
+            sb.append("\"content\":\"").append(escapeJson(m.getContent())).append("\"");
+            if (m.getCreatedAt() != null) {
+                sb.append(",\"createdAt\":\"").append(escapeJson(m.getCreatedAt().toString())).append("\"");
+            }
+            sb.append("}");
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    private String buildChatSessionsDataJson(List<ChatSession> sessions, int limit, int offset) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{");
+        sb.append("\"limit\":").append(limit).append(",");
+        sb.append("\"offset\":").append(offset).append(",");
+        sb.append("\"sessions\":[");
+        for (int i = 0; i < sessions.size(); i++) {
+            ChatSession s = sessions.get(i);
+            if (i > 0) sb.append(",");
+            sb.append("{");
+            sb.append("\"sessionId\":\"").append(escapeJson(s.getSessionId())).append("\"");
+            if (s.getCreatedAt() != null) {
+                sb.append(",\"createdAt\":\"").append(escapeJson(s.getCreatedAt().toString())).append("\"");
+            }
+            if (s.getUpdatedAt() != null) {
+                sb.append(",\"updatedAt\":\"").append(escapeJson(s.getUpdatedAt().toString())).append("\"");
+            }
+            sb.append("}");
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    private int parseIntOrDefault(String value, int defaultValue) {
+        if (value == null || value.trim().isEmpty()) return defaultValue;
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (Exception e) {
+            return defaultValue;
+        }
     }
     
     private String createErrorResponse(int statusCode, String message) {
