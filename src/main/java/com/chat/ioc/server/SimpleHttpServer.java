@@ -65,23 +65,27 @@ public class SimpleHttpServer {
             String method = parts[0];
             String path = parts[1];
             
-            // 读取请求头
+            // 读取请求头并存储Content-Length
             String line;
+            String contentLengthHeader = null;
             while ((line = in.readLine()) != null && !line.isEmpty()) {
-                // 跳过请求头
+                if (line.toLowerCase().startsWith("content-length:")) {
+                    contentLengthHeader = line.substring("content-length:".length()).trim();
+                }
             }
             
             // 处理POST请求体
             String requestBody = "";
-            if ("POST".equalsIgnoreCase(method)) {
-                // 获取Content-Length
-                String contentLengthHeader = getHeader(in, "Content-Length");
-                if (contentLengthHeader != null) {
-                    int contentLength = Integer.parseInt(contentLengthHeader);
-                    char[] bodyChars = new char[contentLength];
-                    in.read(bodyChars, 0, contentLength);
-                    requestBody = new String(bodyChars);
+            if ("POST".equalsIgnoreCase(method) && contentLengthHeader != null) {
+                int contentLength = Integer.parseInt(contentLengthHeader);
+                char[] bodyChars = new char[contentLength];
+                int totalRead = 0;
+                while (totalRead < contentLength) {
+                    int read = in.read(bodyChars, totalRead, contentLength - totalRead);
+                    if (read == -1) break;
+                    totalRead += read;
                 }
+                requestBody = new String(bodyChars);
             }
             
             // 路由处理
@@ -156,6 +160,13 @@ public class SimpleHttpServer {
     
     private LoginRequest parseLoginRequest(String json) {
         try {
+            if (json == null || json.trim().isEmpty()) {
+                System.err.println("Empty or null JSON request body");
+                return null;
+            }
+            
+            System.out.println("Parsing login request JSON: " + json);
+            
             // 简单解析JSON字符串
             Pattern usernamePattern = Pattern.compile("\"username\"\\s*:\\s*\"([^\"]+)\"");
             Pattern passwordPattern = Pattern.compile("\"password\"\\s*:\\s*\"([^\"]+)\"");
@@ -168,16 +179,24 @@ public class SimpleHttpServer {
             
             if (usernameMatcher.find()) {
                 username = usernameMatcher.group(1);
+            } else {
+                System.err.println("Username not found in JSON: " + json);
             }
             
             if (passwordMatcher.find()) {
                 password = passwordMatcher.group(1);
+            } else {
+                System.err.println("Password not found in JSON: " + json);
             }
             
             if (username != null && password != null) {
+                System.out.println("Successfully parsed login request for username: " + username);
                 return new LoginRequest(username, password);
+            } else {
+                System.err.println("Failed to parse login request - missing username or password");
             }
         } catch (Exception e) {
+            System.err.println("Exception occurred while parsing login request: " + e.getMessage());
             e.printStackTrace();
         }
         return null;
