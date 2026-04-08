@@ -35,7 +35,7 @@
             <configuration>
               <transformers>
                 <transformer>
-                  <mainClass>com.chat.ioc.example.ChatApplication</mainClass>
+                  <mainClass>com.chat.ioc.Application</mainClass>
                 </transformer>
               </transformers>
             </configuration>
@@ -145,11 +145,11 @@
     </dependency>
   </dependencies>
   <properties>
-    <maven.compiler.source>17</maven.compiler.source>
-    <mockito.version>5.1.1</mockito.version>
     <maven.compiler.target>17</maven.compiler.target>
+    <maven.compiler.source>17</maven.compiler.source>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <assertj.version>3.24.2</assertj.version>
     <junit.version>5.9.2</junit.version>
+    <mockito.version>5.1.1</mockito.version>
   </properties>
 </project>

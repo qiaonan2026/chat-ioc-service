@@ -1,0 +1,300 @@
+package com.chat.ioc.server;
+
+import com.chat.ioc.Application;
+import com.chat.ioc.config.AppConfig;
+import com.chat.ioc.controller.AuthController;
+import com.chat.ioc.controller.HomeController;
+import com.chat.ioc.entity.ApiResponse;
+import com.chat.ioc.entity.LoginRequest;
+import com.chat.ioc.entity.LoginResponse;
+import com.chat.ioc.service.AuthService;
+import com.chat.ioc.service.HomePageService;
+
+import java.io.*;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * 简单的HTTP服务器，用于处理API请求
+ */
+public class SimpleHttpServer {
+    
+    private ServerSocket serverSocket;
+    private boolean isRunning = false;
+    
+    private final HomeController homeController;
+    private final AuthController authController;
+    
+    public SimpleHttpServer() {
+        // 初始化IoC容器和控制器
+        var container = AppConfig.createContainer();
+        HomePageService homePageService = (HomePageService) container.getBean("homePageService");
+        this.homeController = new HomeController(homePageService);
+        
+        AuthService authService = (AuthService) container.getBean("authService");
+        this.authController = new AuthController(authService);
+    }
+    
+    public void start(int port) throws IOException {
+        serverSocket = new ServerSocket(port);
+        isRunning = true;
+        
+        System.out.println("HTTP Server started on port " + port);
+        
+        while (isRunning) {
+            Socket clientSocket = serverSocket.accept();
+            handleRequest(clientSocket);
+        }
+    }
+    
+    private void handleRequest(Socket clientSocket) {
+        try (BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
+             PrintWriter out = new PrintWriter(clientSocket.getOutputStream(), true);
+             BufferedWriter dataOut = new BufferedWriter(new OutputStreamWriter(clientSocket.getOutputStream(), StandardCharsets.UTF_8))) {
+            
+            // 读取请求行
+            String requestLine = in.readLine();
+            if (requestLine == null) return;
+            
+            String[] parts = requestLine.split(" ");
+            if (parts.length != 3) return;
+            
+            String method = parts[0];
+            String path = parts[1];
+            
+            // 读取请求头
+            String line;
+            while ((line = in.readLine()) != null && !line.isEmpty()) {
+                // 跳过请求头
+            }
+            
+            // 处理POST请求体
+            String requestBody = "";
+            if ("POST".equalsIgnoreCase(method)) {
+                // 获取Content-Length
+                String contentLengthHeader = getHeader(in, "Content-Length");
+                if (contentLengthHeader != null) {
+                    int contentLength = Integer.parseInt(contentLengthHeader);
+                    char[] bodyChars = new char[contentLength];
+                    in.read(bodyChars, 0, contentLength);
+                    requestBody = new String(bodyChars);
+                }
+            }
+            
+            // 路由处理
+            String response = routeRequest(method, path, requestBody);
+            
+            // 发送响应
+            sendResponse(out, dataOut, response);
+            
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            try {
+                clientSocket.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+    
+    private String getHeader(BufferedReader in, String headerName) throws IOException {
+        String line;
+        while ((line = in.readLine()) != null && !line.isEmpty()) {
+            if (line.toLowerCase().startsWith(headerName.toLowerCase() + ":")) {
+                return line.substring(headerName.length() + 2).trim();
+            }
+        }
+        return null;
+    }
+    
+    private String routeRequest(String method, String path, String requestBody) {
+        try {
+            // 定义路由模式
+            if ("GET".equalsIgnoreCase(method)) {
+                if ("/api/home".equals(path)) {
+                    var response = homeController.getHome();
+                    return toJson(response);
+                } else if ("/api/home/detail".equals(path)) {
+                    var response = homeController.getDetailedHome();
+                    return toJson(response);
+                } else if ("/api/ping".equals(path)) {
+                    var response = homeController.ping();
+                    return toJson(response);
+                } else if ("/api/health".equals(path)) {
+                    var response = homeController.health();
+                    return toJson(response);
+                }
+            } else if ("POST".equalsIgnoreCase(method)) {
+                if ("/api/login".equals(path)) {
+                    // 解析JSON请求体
+                    LoginRequest loginRequest = parseLoginRequest(requestBody);
+                    if (loginRequest != null) {
+                        var response = authController.login(loginRequest);
+                        return toJson(response);
+                    } else {
+                        // 返回错误响应
+                        return createErrorResponse(400, "Bad Request: Invalid JSON");
+                    }
+                } else if ("/api/logout".equals(path)) {
+                    // 解析token
+                    String token = parseTokenFromRequest(requestBody);
+                    var response = authController.logout(token);
+                    return toJson(response);
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            return createErrorResponse(500, "Internal Server Error: " + e.getMessage());
+        }
+        
+        return createErrorResponse(404, "Not Found");
+    }
+    
+    private LoginRequest parseLoginRequest(String json) {
+        try {
+            // 简单解析JSON字符串
+            Pattern usernamePattern = Pattern.compile("\"username\"\\s*:\\s*\"([^\"]+)\"");
+            Pattern passwordPattern = Pattern.compile("\"password\"\\s*:\\s*\"([^\"]+)\"");
+            
+            Matcher usernameMatcher = usernamePattern.matcher(json);
+            Matcher passwordMatcher = passwordPattern.matcher(json);
+            
+            String username = null;
+            String password = null;
+            
+            if (usernameMatcher.find()) {
+                username = usernameMatcher.group(1);
+            }
+            
+            if (passwordMatcher.find()) {
+                password = passwordMatcher.group(1);
+            }
+            
+            if (username != null && password != null) {
+                return new LoginRequest(username, password);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+    
+    private String parseTokenFromRequest(String json) {
+        try {
+            Pattern tokenPattern = Pattern.compile("\"token\"\\s*:\\s*\"([^\"]+)\"");
+            Matcher tokenMatcher = tokenPattern.matcher(json);
+            
+            if (tokenMatcher.find()) {
+                return tokenMatcher.group(1);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+    
+    private String toJson(Object obj) {
+        // 简单的对象到JSON转换
+        if (obj instanceof ApiResponse) {
+            ApiResponse<?> apiResponse = (ApiResponse<?>) obj;
+            StringBuilder sb = new StringBuilder();
+            sb.append("{");
+            sb.append("\"code\":").append(apiResponse.getCode()).append(",");
+            sb.append("\"message\":\"").append(escapeJson(apiResponse.getMessage())).append("\",");
+            
+            if (apiResponse.getData() != null) {
+                sb.append("\"data\":").append(objectToJson(apiResponse.getData()));
+            } else {
+                sb.append("\"data\":null");
+            }
+            
+            sb.append("}");
+            return sb.toString();
+        }
+        return objectToJson(obj);
+    }
+    
+    private String objectToJson(Object obj) {
+        if (obj instanceof LoginResponse) {
+            LoginResponse lr = (LoginResponse) obj;
+            StringBuilder sb = new StringBuilder();
+            sb.append("{");
+            sb.append("\"success\":").append(lr.isSuccess()).append(",");
+            if (lr.getToken() != null) {
+                sb.append("\"token\":\"").append(escapeJson(lr.getToken())).append("\",");
+            } else {
+                sb.append("\"token\":null,");
+            }
+            if (lr.getUser() != null) {
+                sb.append("\"user\":").append(objectToJson(lr.getUser())).append(",");
+            } else {
+                sb.append("\"user\":null,");
+            }
+            sb.append("\"message\":\"").append(escapeJson(lr.getMessage())).append("\"");
+            sb.append("}");
+            return sb.toString();
+        } else if (obj instanceof com.chat.ioc.entity.User) {
+            com.chat.ioc.entity.User user = (com.chat.ioc.entity.User) obj;
+            StringBuilder sb = new StringBuilder();
+            sb.append("{");
+            sb.append("\"id\":").append(user.getId()).append(",");
+            sb.append("\"username\":\"").append(escapeJson(user.getUsername())).append("\",");
+            sb.append("\"email\":\"").append(escapeJson(user.getEmail())).append("\",");
+            sb.append("\"nickname\":\"").append(escapeJson(user.getNickname())).append("\"");
+            sb.append("}");
+            return sb.toString();
+        } else if (obj instanceof String) {
+            return "\"" + escapeJson((String) obj) + "\"";
+        } else if (obj instanceof com.chat.ioc.entity.HomePageInfo) {
+            com.chat.ioc.entity.HomePageInfo info = (com.chat.ioc.entity.HomePageInfo) obj;
+            StringBuilder sb = new StringBuilder();
+            sb.append("{");
+            sb.append("\"title\":\"").append(escapeJson(info.getTitle())).append("\",");
+            sb.append("\"description\":\"").append(escapeJson(info.getDescription())).append("\",");
+            sb.append("\"version\":\"").append(escapeJson(info.getVersion())).append("\",");
+            sb.append("\"environment\":\"").append(escapeJson(info.getEnvironment())).append("\",");
+            sb.append("\"activeUsers\":").append(info.getActiveUsers()).append(",");
+            sb.append("\"status\":\"").append(escapeJson(info.getStatus())).append("\"");
+            sb.append("}");
+            return sb.toString();
+        } else {
+            return "\"" + obj.toString() + "\"";
+        }
+    }
+    
+    private String escapeJson(String str) {
+        if (str == null) return null;
+        return str.replace("\\", "\\\\")
+                 .replace("\"", "\\\"")
+                 .replace("\n", "\\n")
+                 .replace("\r", "\\r")
+                 .replace("\t", "\\t");
+    }
+    
+    private String createErrorResponse(int statusCode, String message) {
+        return "{\"code\":" + statusCode + ",\"message\":\"" + escapeJson(message) + "\",\"data\":null}";
+    }
+    
+    private void sendResponse(PrintWriter out, BufferedWriter dataOut, String responseBody) throws IOException {
+        out.println("HTTP/1.1 200 OK");
+        out.println("Content-Type: application/json; charset=utf-8");
+        out.println("Access-Control-Allow-Origin: *");
+        out.println("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
+        out.println("Access-Control-Allow-Headers: Content-Type, Authorization");
+        out.println("Content-Length: " + responseBody.getBytes(StandardCharsets.UTF_8).length);
+        out.println(); // 空行表示头部结束
+        dataOut.write(responseBody);
+        dataOut.flush();
+    }
+    
+    public void stop() throws IOException {
+        isRunning = false;
+        if (serverSocket != null && !serverSocket.isClosed()) {
+            serverSocket.close();
+        }
+    }
+}
