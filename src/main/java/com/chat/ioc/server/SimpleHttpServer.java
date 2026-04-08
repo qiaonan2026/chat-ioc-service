@@ -7,6 +7,8 @@ import com.chat.ioc.controller.HomeController;
 import com.chat.ioc.entity.ApiResponse;
 import com.chat.ioc.entity.LoginRequest;
 import com.chat.ioc.entity.LoginResponse;
+import com.chat.ioc.entity.RegisterRequest;
+import com.chat.ioc.entity.User;
 import com.chat.ioc.service.AuthService;
 import com.chat.ioc.service.HomePageService;
 
@@ -133,7 +135,7 @@ public class SimpleHttpServer {
                     return toJson(response);
                 }
             } else if ("POST".equalsIgnoreCase(method)) {
-                if ("/api/login".equals(path)) {
+                if ("/api/login".equals(path) || "/api/auth/login".equals(path)) {
                     // 解析JSON请求体
                     LoginRequest loginRequest = parseLoginRequest(requestBody);
                     if (loginRequest != null) {
@@ -148,6 +150,16 @@ public class SimpleHttpServer {
                     String token = parseTokenFromRequest(requestBody);
                     var response = authController.logout(token);
                     return toJson(response);
+                } else if ("/api/register".equals(path) || "/api/auth/register".equals(path)) {
+                    // 解析注册请求体
+                    RegisterRequest registerRequest = parseRegisterRequest(requestBody);
+                    if (registerRequest != null) {
+                        var response = authController.register(registerRequest);
+                        return toJson(response);
+                    } else {
+                        // 返回错误响应
+                        return createErrorResponse(400, "Bad Request: Invalid JSON");
+                    }
                 }
             }
         } catch (Exception e) {
@@ -211,6 +223,73 @@ public class SimpleHttpServer {
                 return tokenMatcher.group(1);
             }
         } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+    
+    private RegisterRequest parseRegisterRequest(String json) {
+        try {
+            if (json == null || json.trim().isEmpty()) {
+                System.err.println("Empty or null JSON request body for registration");
+                return null;
+            }
+            
+            System.out.println("Parsing register request JSON: " + json);
+            
+            // 简单解析JSON字符串
+            Pattern usernamePattern = Pattern.compile("\"username\"\\s*:\\s*\"([^\"]+)\"");
+            Pattern passwordPattern = Pattern.compile("\"password\"\\s*:\\s*\"([^\"]+)\"");
+            Pattern emailPattern = Pattern.compile("\"email\"\\s*:\\s*\"([^\"]+)\"");
+            Pattern nicknamePattern = Pattern.compile("\"nickname\"\\s*:\\s*\"([^\"]+)\"");
+            
+            Matcher usernameMatcher = usernamePattern.matcher(json);
+            Matcher passwordMatcher = passwordPattern.matcher(json);
+            Matcher emailMatcher = emailPattern.matcher(json);
+            Matcher nicknameMatcher = nicknamePattern.matcher(json);
+            
+            String username = null;
+            String password = null;
+            String email = null;
+            String nickname = null;
+            
+            if (usernameMatcher.find()) {
+                username = usernameMatcher.group(1);
+            } else {
+                System.err.println("Username not found in JSON: " + json);
+            }
+            
+            if (passwordMatcher.find()) {
+                password = passwordMatcher.group(1);
+            } else {
+                System.err.println("Password not found in JSON: " + json);
+            }
+            
+            if (emailMatcher.find()) {
+                email = emailMatcher.group(1);
+            } else {
+                System.err.println("Email not found in JSON: " + json);
+            }
+            
+            if (nicknameMatcher.find()) {
+                nickname = nicknameMatcher.group(1);
+            } else {
+                System.err.println("Nickname not found in JSON: " + json);
+            }
+            
+            if (username != null && password != null) {
+                System.out.println("Successfully parsed register request for username: " + username);
+                RegisterRequest request = new RegisterRequest();
+                request.setUsername(username);
+                request.setPassword(password);
+                request.setEmail(email);
+                request.setNickname(nickname);
+                return request;
+            } else {
+                System.err.println("Failed to parse register request - missing required fields (username or password)");
+            }
+        } catch (Exception e) {
+            System.err.println("Exception occurred while parsing register request: " + e.getMessage());
             e.printStackTrace();
         }
         return null;

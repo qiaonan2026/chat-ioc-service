@@ -3,6 +3,8 @@ package com.chat.ioc.controller;
 import com.chat.ioc.entity.ApiResponse;
 import com.chat.ioc.entity.LoginRequest;
 import com.chat.ioc.entity.LoginResponse;
+import com.chat.ioc.entity.RegisterRequest;
+import com.chat.ioc.entity.User;
 import com.chat.ioc.service.AuthService;
 
 public class AuthController {
@@ -36,6 +38,30 @@ public class AuthController {
             return ApiResponse.success("Logout successful", "Logged out successfully");
         } catch (Exception e) {
             return ApiResponse.error("Logout failed: " + e.getMessage());
+        }
+    }
+
+    public ApiResponse<User> register(RegisterRequest registerRequest) {
+        try {
+            // Create a new user from the registration request
+            User newUser = new User();
+            newUser.setUsername(registerRequest.getUsername());
+            newUser.setPassword(registerRequest.getPassword()); // In a real app, this should be hashed
+            newUser.setEmail(registerRequest.getEmail());
+            newUser.setNickname(registerRequest.getNickname());
+            newUser.setIsActive(true);
+
+            // Attempt to register the user
+            User registeredUser = authService.registerUser(newUser);
+
+            if (registeredUser != null) {
+                return ApiResponse.success("User registered successfully", registeredUser);
+            } else {
+                return ApiResponse.error("Registration failed: username may already exist");
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ApiResponse.error("Registration failed due to server error: " + e.getMessage());
         }
     }
 }

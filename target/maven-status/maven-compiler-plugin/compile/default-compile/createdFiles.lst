@@ -12,6 +12,7 @@ com/chat/ioc/entity/HomePageInfo.class
 com/chat/ioc/IOCContainer.class
 com/chat/ioc/entity/User.class
 com/chat/ioc/App.class
+com/chat/ioc/entity/RegisterRequest.class
 com/chat/ioc/example/EmailMessageService.class
 com/chat/ioc/example/MessageService.class
 com/chat/ioc/example/UserService.class
