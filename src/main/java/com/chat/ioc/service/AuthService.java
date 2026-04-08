@@ -9,4 +9,5 @@ public interface AuthService {
     boolean validateToken(String token);
     User registerUser(User user);
     User findByUsername(String username);
+    User findByToken(String token);
 }

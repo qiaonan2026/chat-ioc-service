@@ -79,4 +79,23 @@ public class AuthController {
             return ApiResponse.error("Register failed due to server error: " + e.getMessage());
         }
     }
+    
+    public ApiResponse<User> getCurrentUser(String token) {
+        try {
+            if (token == null || token.trim().isEmpty()) {
+                return ApiResponse.error(401, "Unauthorized: Token required");
+            }
+            
+            User user = authService.findByToken(token);
+            if (user != null) {
+                user.setPassword(null); // never return password
+                return ApiResponse.success("User info retrieved successfully", user);
+            } else {
+                return ApiResponse.error(401, "Unauthorized: Invalid token");
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ApiResponse.error("Failed to retrieve user info: " + e.getMessage());
+        }
+    }
 }

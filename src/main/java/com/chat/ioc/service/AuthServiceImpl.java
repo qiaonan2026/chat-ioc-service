@@ -14,6 +14,8 @@ public class AuthServiceImpl implements AuthService {
     private final DatabaseManager databaseManager;
     // In-memory token storage (would use Redis in production)
     private final Map<String, String> validTokens = new ConcurrentHashMap<>();
+    // Map from token to user id for quick lookup
+    private final Map<String, Long> tokenToUserMap = new ConcurrentHashMap<>();
 
     public AuthServiceImpl() {
         this.databaseManager = new DatabaseManager();
@@ -66,9 +68,27 @@ public class AuthServiceImpl implements AuthService {
         return databaseManager.findByUsername(username);
     }
 
+    @Override
+    public User findByToken(String token) {
+        if (!validateToken(token)) {
+            return null;
+        }
+        
+        // Find user id associated with the token
+        for (Map.Entry<String, String> entry : validTokens.entrySet()) {
+            if (entry.getValue().equals(token)) {
+                String userIdStr = entry.getKey();
+                Long userId = Long.parseLong(userIdStr);
+                return databaseManager.findById(userId);
+            }
+        }
+        return null;
+    }
+
     private String generateToken(User user) {
         String token = UUID.randomUUID().toString();
         validTokens.put(String.valueOf(user.getId()), token);
+        tokenToUserMap.put(token, user.getId());
         return token;
     }
 }

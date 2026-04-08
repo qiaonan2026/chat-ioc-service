@@ -67,12 +67,15 @@ public class SimpleHttpServer {
             String method = parts[0];
             String path = parts[1];
             
-            // 读取请求头并存储Content-Length
+            // 读取请求头并存储Content-Length和Authorization
             String line;
             String contentLengthHeader = null;
+            String authorizationHeader = null;
             while ((line = in.readLine()) != null && !line.isEmpty()) {
                 if (line.toLowerCase().startsWith("content-length:")) {
                     contentLengthHeader = line.substring("content-length:".length()).trim();
+                } else if (line.toLowerCase().startsWith("authorization:")) {
+                    authorizationHeader = line.substring("authorization:".length()).trim();
                 }
             }
             
@@ -90,8 +93,23 @@ public class SimpleHttpServer {
                 requestBody = new String(bodyChars);
             }
             
+            // 提取Bearer token
+            String extractedToken = null;
+            if (authorizationHeader != null && authorizationHeader.toLowerCase().startsWith("bearer ")) {
+                extractedToken = authorizationHeader.substring(7).trim();
+            }
+            
+            // 如果是GET请求，仍然需要处理Authorization头来获取token
+            String authToken = null;
+            if ("GET".equalsIgnoreCase(method) && (path.equals("/api/me") || path.equals("/api/auth/me"))) {
+                // 重新读取请求头来获取Authorization
+                // 由于流已部分读取，这里简化处理，实际应用中应该有更好的设计
+                // 在此场景下，我们将token放在查询参数中作为一个临时解决方案
+                // 或者使用特定的header
+            }
+            
             // 路由处理
-            String response = routeRequest(method, path, requestBody);
+            String response = routeRequest(method, path, requestBody, extractedToken);
             
             // 发送响应
             sendResponse(out, dataOut, response);
@@ -117,7 +135,7 @@ public class SimpleHttpServer {
         return null;
     }
     
-    private String routeRequest(String method, String path, String requestBody) {
+    private String routeRequest(String method, String path, String requestBody, String token) {
         try {
             // 定义路由模式
             if ("GET".equalsIgnoreCase(method)) {
@@ -133,6 +151,10 @@ public class SimpleHttpServer {
                 } else if ("/api/health".equals(path)) {
                     var response = homeController.health();
                     return toJson(response);
+                } else if ("/api/me".equals(path) || "/api/auth/me".equals(path)) {
+                    // 获取当前用户信息
+                    var response = authController.getCurrentUser(token);
+                    return toJson(response);
                 }
             } else if ("POST".equalsIgnoreCase(method)) {
                 if ("/api/login".equals(path) || "/api/auth/login".equals(path)) {
@@ -147,8 +169,8 @@ public class SimpleHttpServer {
                     }
                 } else if ("/api/logout".equals(path)) {
                     // 解析token
-                    String token = parseTokenFromRequest(requestBody);
-                    var response = authController.logout(token);
+                    String tokenFromBody = parseTokenFromRequest(requestBody);
+                    var response = authController.logout(tokenFromBody);
                     return toJson(response);
                 } else if ("/api/register".equals(path) || "/api/auth/register".equals(path)) {
                     // 解析注册请求体

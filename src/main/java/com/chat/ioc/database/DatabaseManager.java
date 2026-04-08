@@ -197,4 +197,32 @@ public class DatabaseManager {
         
         return users;
     }
+    
+    /**
+     * 根据ID查找用户
+     */
+    public User findById(Long id) {
+        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD)) {
+            String sql = "SELECT id, username, password, email, nickname, is_active FROM users WHERE id = ? AND is_active = TRUE";
+            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                stmt.setLong(1, id);
+                ResultSet rs = stmt.executeQuery();
+                
+                if (rs.next()) {
+                    User user = new User();
+                    user.setId(rs.getLong("id"));
+                    user.setUsername(rs.getString("username"));
+                    user.setPassword(rs.getString("password"));
+                    user.setEmail(rs.getString("email"));
+                    user.setNickname(rs.getString("nickname"));
+                    user.setIsActive(rs.getBoolean("is_active"));
+                    return user;
+                }
+            }
+            
+            return null;
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to find user by id", e);
+        }
+    }
 }
